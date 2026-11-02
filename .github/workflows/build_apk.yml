@@ -29,29 +29,23 @@ jobs:
       - name: Assemble & Build APK
         run: |
           set -e
-          # ۱. ساخت پروژه جدید
+          # ۱. ساخت پروژه فلاتر
           flutter create --org com.transliterate app_project
           cd app_project
 
-          # ۲. نصب کتابخانه‌ها
+          # ۲. افزودن وابستگی‌ها
           flutter pub add flutter_contacts permission_handler flutter_riverpod path_provider
 
-          # ۳. جستجوی فایل main.dart در کل مخزن یا استفاده از کد پیش‌فرض
-          MAIN_FILE=$(find .. -maxdepth 3 -name "main.dart" | head -n 1)
-
-          if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
-            echo "Found main.dart at: $MAIN_FILE"
-            cp "$MAIN_FILE" lib/main.dart
+          # ۳. کپی هوشمند فایل main.dart
+          if [ -f "../lib/main.dart" ]; then
+            cp ../lib/main.dart lib/main.dart
+            echo "main.dart copied from lib/"
+          elif [ -f "../main.dart" ]; then
+            cp ../main.dart lib/main.dart
+            echo "main.dart copied from root"
           else
-            echo "main.dart not found in repository! Generating fallback template..."
-            # اگر فایل پیدا نشد، یک فایل ساده و استاندارد می‌سازد تا بیلد خطا ندهد
-            cat << 'EOF' > lib/main.dart
-import 'package:flutter/material.dart';
-
-void main() => runApp(const MaterialApp(
-  home: Scaffold(body: Center(child: Text('برنامه با موفقیت نصب شد!'))),
-));
-EOF
+            echo "Error: فایل main.dart پیدا نشد!"
+            exit 1
           fi
 
           # ۴. افزودن دسترسی‌ها به AndroidManifest
@@ -68,7 +62,7 @@ EOF
                       f.write(txt)
           "
 
-          # ۵. بیلد نهایی
+          # ۵. بیلد نهایی APK
           flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK
