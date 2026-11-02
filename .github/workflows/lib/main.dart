@@ -3,10 +3,8 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
-import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -16,8 +14,6 @@ import 'package:permission_handler/permission_handler.dart';
 // ==========================================
 
 enum ScriptCategory { persian, englishNative, finglish, mixed, nonNameOrOrg, unknown }
-
-enum TransliterationStyle { commonPassport, scientificIso, informal }
 
 class AppContact {
   final String id;
@@ -133,7 +129,6 @@ class UnicodeNormalizer {
 }
 
 class BuiltinLexicon {
-  // واژه‌نامه پرکاربرد برای تضمین دقت بالا
   static const Map<String, String> faToEn = {
     'محمد': 'Mohammad', 'محمدرضا': 'Mohammadreza', 'علی': 'Ali', 'علیرضا': 'Alireza',
     'حسین': 'Hossein', 'امیرحسین': 'Amirhossein', 'مهدی': 'Mehdi', 'رضا': 'Reza',
@@ -172,7 +167,7 @@ class NlpEngine {
     'aa': 'آ', 'ee': 'ی', 'oo': 'و', 'ou': 'و',
   };
 
-  static AppContact process(AppContact c, {TransliterationStyle style = TransliterationStyle.commonPassport}) {
+  static AppContact process(AppContact c) {
     final raw = c.displayName.isNotEmpty ? c.displayName : '${c.givenName} ${c.familyName}'.trim();
     if (raw.isEmpty) return c;
 
@@ -183,7 +178,6 @@ class NlpEngine {
     final bool hasPersian = RegExp(r'[\u0600-\u06FF]').hasMatch(norm);
     final bool hasLatin = RegExp(r'[a-zA-Z]').hasMatch(norm);
 
-    // ۱. بررسی سازمانی / ارقام
     final lower = norm.toLowerCase();
     if (lower.contains('taxi') || lower.contains('تاکسی') || lower.contains('bank') ||
         lower.contains('بانک') || lower.contains('pizza') || lower.contains('پیتزا') ||
@@ -191,7 +185,6 @@ class NlpEngine {
       return c.copyWith(scriptCategory: ScriptCategory.nonNameOrOrg, suggestedOutput: raw, confidence: 1.0);
     }
 
-    // ۲. نگارش ترکیبی
     if (hasPersian && hasLatin) {
       return c.copyWith(scriptCategory: ScriptCategory.mixed, suggestedOutput: raw, confidence: 0.95);
     }
@@ -199,7 +192,6 @@ class NlpEngine {
     String output = '';
     ScriptCategory cat = ScriptCategory.unknown;
 
-    // ۳. فارسی -> انگلیسی
     if (hasPersian && !hasLatin) {
       cat = ScriptCategory.persian;
       final tokens = norm.split(RegExp(r'[\s\u200C]+'));
@@ -224,12 +216,10 @@ class NlpEngine {
       output = UnicodeNormalizer.toTitleCase(outWords.join(' '));
     }
 
-    // ۴. لاتین -> فینگلیش یا انگلیسی
     if (hasLatin && !hasPersian) {
       final tokens = norm.split(' ');
       bool isFinglish = false;
 
-      // تشخیص فینگلیش
       for (final t in tokens) {
         final tl = t.toLowerCase();
         if (BuiltinLexicon.enToFa.containsKey(tl) ||
@@ -254,7 +244,7 @@ class NlpEngine {
         }
         output = outWords.join(' ');
       } else {
-        output = raw; // انگلیسی اصیل به طور پیش‌فرض بدون تغییر می‌ماند
+        output = raw;
       }
     }
 
@@ -287,7 +277,7 @@ class NlpEngine {
 }
 
 // ==========================================
-// ۳. ذخیره‌سازی محلی تاریخچه (Undo Repository)
+// ۳. ذخیره‌سازی محلی تاریخچه (Undo)
 // ==========================================
 
 class AuditStorage {
@@ -340,7 +330,6 @@ class AuditStorage {
 
 class ContactState {
   final bool isLoading;
-  final double progress;
   final List<AppContact> all;
   final List<AppContact> filtered;
   final Set<String> selectedIds;
@@ -349,7 +338,6 @@ class ContactState {
 
   ContactState({
     this.isLoading = false,
-    this.progress = 0.0,
     this.all = const [],
     this.filtered = const [],
     this.selectedIds = const {},
@@ -359,7 +347,6 @@ class ContactState {
 
   ContactState copyWith({
     bool? isLoading,
-    double? progress,
     List<AppContact>? all,
     List<AppContact>? filtered,
     Set<String>? selectedIds,
@@ -369,7 +356,6 @@ class ContactState {
   }) {
     return ContactState(
       isLoading: isLoading ?? this.isLoading,
-      progress: progress ?? this.progress,
       all: all ?? this.all,
       filtered: filtered ?? this.filtered,
       selectedIds: selectedIds ?? this.selectedIds,
@@ -383,7 +369,7 @@ class ContactNotifier extends StateNotifier<ContactState> {
   ContactNotifier() : super(ContactState());
 
   Future<void> loadContacts() async {
-    state = state.copyWith(isLoading: true, progress: 0.0);
+    state = state.copyWith(isLoading: true);
 
     final status = await Permission.contacts.request();
     if (!status.isGranted) {
@@ -392,14 +378,17 @@ class ContactNotifier extends StateNotifier<ContactState> {
     }
 
     final raw = await FlutterContacts.getContacts(withProperties: true);
-    final List<AppContact> initial = raw.map((c) => AppContact(
-      id: c.id,
-      displayName: c.displayName,
-      givenName: c.name.first,
-      familyName: c.name.last,
-    )).toList();
+    final List<AppContact> initial = raw.map((c) {
+      final first = c.name?.first ?? '';
+      final last = c.name?.last ?? '';
+      return AppContact(
+        id: c.id,
+        displayName: c.displayName,
+        givenName: first,
+        familyName: last,
+      );
+    }).toList();
 
-    // پردازش ۱۰هزارتایی بدون لگ
     final List<AppContact> processed = await Isolate.run(() {
       return initial.map((c) => NlpEngine.process(c)).toList();
     });
@@ -467,19 +456,26 @@ class ContactNotifier extends StateNotifier<ContactState> {
 
       final contact = await FlutterContacts.getContact(item.id);
       if (contact != null) {
+        final oldFirst = contact.name?.first ?? '';
+        final oldLast = contact.name?.last ?? '';
         audit.add(AuditLogItem(
           batchId: batchId,
           contactId: item.id,
           oldDisplayName: item.displayName,
           newDisplayName: item.suggestedOutput,
-          oldGiven: item.givenName,
-          oldFamily: item.familyName,
+          oldGiven: oldFirst,
+          oldFamily: oldLast,
           timestamp: DateTime.now(),
         ));
 
         final parts = item.suggestedOutput.split(' ');
-        contact.name.first = parts.first;
-        contact.name.last = parts.length > 1 ? parts.sublist(1).join(' ') : '';
+        final newFirst = parts.first;
+        final newLast = parts.length > 1 ? parts.sublist(1).join(' ') : '';
+
+        if (contact.name != null) {
+          contact.name!.first = newFirst;
+          contact.name!.last = newLast;
+        }
         await contact.update();
       }
     }
@@ -497,9 +493,11 @@ class ContactNotifier extends StateNotifier<ContactState> {
     for (final b in batchItems) {
       final contact = await FlutterContacts.getContact(b.contactId);
       if (contact != null) {
-        contact.name.first = b.oldGiven;
-        contact.name.last = b.oldFamily;
-        await contact.update();
+        if (contact.name != null) {
+          contact.name!.first = b.oldGiven;
+          contact.name!.last = b.oldFamily;
+          await contact.update();
+        }
       }
     }
 
@@ -511,7 +509,7 @@ class ContactNotifier extends StateNotifier<ContactState> {
 final contactProvider = StateNotifierProvider<ContactNotifier, ContactState>((ref) => ContactNotifier());
 
 // ==========================================
-// ۵. رابط کاربری (UI & Screens)
+// ۵. رابط کاربری (UI) با چیدمان کامل راست‌به‌چپ
 // ==========================================
 
 void main() {
@@ -531,13 +529,12 @@ class MyApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0D9488)),
       ),
-      locale: const Locale('fa', 'IR'),
-      supportedLocales: const [Locale('fa', 'IR'), Locale('en', 'US')],
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
+      builder: (context, child) {
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: child ?? const SizedBox(),
+        );
+      },
       home: const HomeScreen(),
     );
   }
@@ -716,7 +713,6 @@ class HistoryScreen extends ConsumerWidget {
           final items = snap.data!;
           if (items.isEmpty) return const Center(child: Text('هیچ سابقه تبدیلی ثبت نشده است.'));
 
-          // گروه‌بندی بر اساس BatchId
           final Map<String, List<AuditLogItem>> groups = {};
           for (final i in items) {
             groups.putIfAbsent(i.batchId, () => []).add(i);
