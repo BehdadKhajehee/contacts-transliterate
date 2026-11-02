@@ -28,17 +28,27 @@ jobs:
 
       - name: Assemble & Build APK
         run: |
+          set -e
           # ۱. ساخت پروژه فلاتر
           flutter create --org com.transliterate app_project
           cd app_project
 
-          # ۲. نصب پکیج‌های پایدار و هماهنگ
-          flutter pub add flutter_contacts:^1.1.7+1 permission_handler:^11.3.1 flutter_riverpod:^2.5.1 path_provider:^2.1.2
+          # ۲. نصب وابستگی‌ها
+          flutter pub add flutter_contacts permission_handler flutter_riverpod path_provider
 
-          # ۳. انتقال کد اصلی برنامه
-          cp ../lib/main.dart lib/main.dart
+          # ۳. کپی هوشمند فایل main.dart (چه در پوشه lib باشد چه در ریشه پروژه)
+          if [ -f "../lib/main.dart" ]; then
+            cp ../lib/main.dart lib/main.dart
+            echo "Found main.dart in ../lib/"
+          elif [ -f "../main.dart" ]; then
+            cp ../main.dart lib/main.dart
+            echo "Found main.dart in root"
+          else
+            echo "Error: main.dart not found!"
+            exit 1
+          fi
 
-          # ۴. افزودن دسترسی مخاطبین به مانیفست اندروید
+          # ۴. افزودن دسترسی‌های مخاطبین به مانیفست اندروید
           python3 -c "
           import os
           manifest = 'android/app/src/main/AndroidManifest.xml'
@@ -52,7 +62,7 @@ jobs:
                       f.write(txt)
           "
 
-          # ۵. بیلد نهایی فایل APK
+          # ۵. بیلد APK
           flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK
