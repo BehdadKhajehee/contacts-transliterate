@@ -10,7 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 // ==========================================
-// ۱. مدل‌ها و تعاریف داده‌ای (Domain Models)
+// ۱. مدل‌ها و تعاریف داده‌ای
 // ==========================================
 
 enum ScriptCategory { persian, englishNative, finglish, mixed, nonNameOrOrg, unknown }
@@ -95,7 +95,7 @@ class AuditLogItem {
 }
 
 // ==========================================
-// ۲. موتور پردازش متن و خط (NLP Engine)
+// ۲. موتور پردازش زبان و تشخیص خط (NLP)
 // ==========================================
 
 class UnicodeNormalizer {
@@ -306,7 +306,7 @@ class AuditStorage {
       final content = await file.readAsString();
       if (content.isEmpty) return [];
       final List<dynamic> list = jsonDecode(content);
-      return list.map((e) => AuditLogItem.fromJson(e)).toList();
+      return list.map((e) => AuditLogItem.fromJson(e as Map<String, dynamic>)).toList();
     } catch (_) {
       return [];
     }
@@ -509,7 +509,7 @@ class ContactNotifier extends StateNotifier<ContactState> {
 final contactProvider = StateNotifierProvider<ContactNotifier, ContactState>((ref) => ContactNotifier());
 
 // ==========================================
-// ۵. رابط کاربری (UI) با چیدمان کامل راست‌به‌چپ
+// ۵. رابط کاربری (UI)
 // ==========================================
 
 void main() {
