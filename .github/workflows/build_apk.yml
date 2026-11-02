@@ -23,44 +23,36 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.x'
           channel: 'stable'
           cache: true
 
       - name: Assemble & Build APK
         run: |
-          # ۱. تولید پروژه استاندارد فلاتر
+          # ۱. ساخت پروژه فلاتر
           flutter create --org com.transliterate app_project
           cd app_project
 
-          # ۲. افزودن وابستگی‌های مورد نیاز به پروژه
-          flutter pub add flutter_contacts permission_handler flutter_riverpod path_provider
+          # ۲. نصب پکیج‌های پایدار و هماهنگ
+          flutter pub add flutter_contacts:^1.1.7+1 permission_handler:^11.3.1 flutter_riverpod:^2.5.1 path_provider:^2.1.2
 
           # ۳. انتقال کد اصلی برنامه
           cp ../lib/main.dart lib/main.dart
 
-          # ۴. افزودن دسترسی مخاطبین به AndroidManifest
+          # ۴. افزودن دسترسی مخاطبین به مانیفست اندروید
           python3 -c "
-          path = 'android/app/src/main/AndroidManifest.xml'
-          with open(path, 'r') as f:
-              c = f.read()
-          perms = '    <uses-permission android:name=\"android.permission.READ_CONTACTS\" />\n    <uses-permission android:name=\"android.permission.WRITE_CONTACTS\" />\n'
-          c = c.replace('<application', perms + '    <application')
-          with open(path, 'w') as f:
-              f.write(c)
+          import os
+          manifest = 'android/app/src/main/AndroidManifest.xml'
+          if os.path.exists(manifest):
+              with open(manifest, 'r', encoding='utf-8') as f:
+                  txt = f.read()
+              perms = '    <uses-permission android:name=\"android.permission.READ_CONTACTS\" />\n    <uses-permission android:name=\"android.permission.WRITE_CONTACTS\" />\n'
+              if 'READ_CONTACTS' not in txt:
+                  txt = txt.replace('<application', perms + '    <application')
+                  with open(manifest, 'w', encoding='utf-8') as f:
+                      f.write(txt)
           "
 
-          # ۵. تنظیم حداقل نسخه اندروید (minSdkVersion 21)
-          python3 -c "
-          path = 'android/app/build.gradle'
-          with open(path, 'r') as f:
-              c = f.read()
-          c = c.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 21')
-          with open(path, 'w') as f:
-              f.write(c)
-          "
-
-          # ۶. کامپایل نهایی فایل APK
+          # ۵. بیلد نهایی فایل APK
           flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK
