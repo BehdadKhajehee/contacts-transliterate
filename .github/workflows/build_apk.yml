@@ -1,0 +1,71 @@
+# .github/workflows/build_apk.yml
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.x'
+          channel: 'stable'
+          cache: true
+
+      - name: Assemble & Build APK
+        run: |
+          # ۱. تولید پروژه استاندارد فلاتر
+          flutter create --org com.transliterate app_project
+          cd app_project
+
+          # ۲. افزودن وابستگی‌های مورد نیاز به پروژه
+          flutter pub add flutter_contacts permission_handler flutter_riverpod path_provider
+
+          # ۳. انتقال کد اصلی برنامه
+          cp ../lib/main.dart lib/main.dart
+
+          # ۴. افزودن دسترسی مخاطبین به AndroidManifest
+          python3 -c "
+          path = 'android/app/src/main/AndroidManifest.xml'
+          with open(path, 'r') as f:
+              c = f.read()
+          perms = '    <uses-permission android:name=\"android.permission.READ_CONTACTS\" />\n    <uses-permission android:name=\"android.permission.WRITE_CONTACTS\" />\n'
+          c = c.replace('<application', perms + '    <application')
+          with open(path, 'w') as f:
+              f.write(c)
+          "
+
+          # ۵. تنظیم حداقل نسخه اندروید (minSdkVersion 21)
+          python3 -c "
+          path = 'android/app/build.gradle'
+          with open(path, 'r') as f:
+              c = f.read()
+          c = c.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 21')
+          with open(path, 'w') as f:
+              f.write(c)
+          "
+
+          # ۶. کامپایل نهایی فایل APK
+          flutter build apk --release --no-tree-shake-icons
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: contact-transliterate-release
+          path: app_project/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
