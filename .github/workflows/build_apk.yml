@@ -26,43 +26,779 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Assemble & Build APK
+      - name: Create Flutter Project
         run: |
           set -e
-          # ۱. ساخت پروژه فلاتر
           flutter create --org com.transliterate app_project
           cd app_project
-
-          # ۲. افزودن وابستگی‌ها
           flutter pub add flutter_contacts permission_handler flutter_riverpod path_provider
 
-          # ۳. کپی هوشمند فایل main.dart
-          if [ -f "../lib/main.dart" ]; then
-            cp ../lib/main.dart lib/main.dart
-            echo "main.dart copied from lib/"
-          elif [ -f "../main.dart" ]; then
-            cp ../main.dart lib/main.dart
-            echo "main.dart copied from root"
-          else
-            echo "Error: فایل main.dart پیدا نشد!"
-            exit 1
-          fi
+      - name: Write main.dart
+        shell: python
+        run: |
+          import textwrap
+          dart_code = r'''
+          import 'dart:convert';
+          import 'dart:io';
+          import 'dart:isolate';
+          import 'package:flutter/material.dart';
+          import 'package:flutter_contacts/flutter_contacts.dart';
+          import 'package:flutter_riverpod/flutter_riverpod.dart';
+          import 'package:path_provider/path_provider.dart';
+          import 'package:permission_handler/permission_handler.dart';
 
-          # ۴. افزودن دسترسی‌ها به AndroidManifest
-          python3 -c "
-          import os
-          manifest = 'android/app/src/main/AndroidManifest.xml'
-          if os.path.exists(manifest):
-              with open(manifest, 'r', encoding='utf-8') as f:
-                  txt = f.read()
-              perms = '    <uses-permission android:name=\"android.permission.READ_CONTACTS\" />\n    <uses-permission android:name=\"android.permission.WRITE_CONTACTS\" />\n'
-              if 'READ_CONTACTS' not in txt:
-                  txt = txt.replace('<application', perms + '    <application')
-                  with open(manifest, 'w', encoding='utf-8') as f:
-                      f.write(txt)
-          "
+          enum ScriptCategory { persian, englishNative, finglish, mixed, nonNameOrOrg, unknown }
 
-          # ۵. بیلد نهایی APK
+          class AppContact {
+            final String id;
+            final String displayName;
+            final String givenName;
+            final String familyName;
+            final ScriptCategory scriptCategory;
+            final double confidence;
+            final String suggestedOutput;
+
+            const AppContact({
+              required this.id,
+              required this.displayName,
+              this.givenName = '',
+              this.familyName = '',
+              this.scriptCategory = ScriptCategory.unknown,
+              this.confidence = 1.0,
+              this.suggestedOutput = '',
+            });
+
+            AppContact copyWith({
+              String? displayName,
+              String? givenName,
+              String? familyName,
+              ScriptCategory? scriptCategory,
+              double? confidence,
+              String? suggestedOutput,
+            }) {
+              return AppContact(
+                id: id,
+                displayName: displayName ?? this.displayName,
+                givenName: givenName ?? this.givenName,
+                familyName: familyName ?? this.familyName,
+                scriptCategory: scriptCategory ?? this.scriptCategory,
+                confidence: confidence ?? this.confidence,
+                suggestedOutput: suggestedOutput ?? this.suggestedOutput,
+              );
+            }
+          }
+
+          class AuditLogItem {
+            final String batchId;
+            final String contactId;
+            final String oldDisplayName;
+            final String newDisplayName;
+            final String oldGiven;
+            final String oldFamily;
+            final DateTime timestamp;
+
+            AuditLogItem({
+              required this.batchId,
+              required this.contactId,
+              required this.oldDisplayName,
+              required this.newDisplayName,
+              required this.oldGiven,
+              required this.oldFamily,
+              required this.timestamp,
+            });
+
+            Map<String, dynamic> toJson() => {
+              'batchId': batchId,
+              'contactId': contactId,
+              'oldDisplayName': oldDisplayName,
+              'newDisplayName': newDisplayName,
+              'oldGiven': oldGiven,
+              'oldFamily': oldFamily,
+              'timestamp': timestamp.toIso8601String(),
+            };
+
+            factory AuditLogItem.fromJson(Map<String, dynamic> j) => AuditLogItem(
+              batchId: j['batchId'],
+              contactId: j['contactId'],
+              oldDisplayName: j['oldDisplayName'],
+              newDisplayName: j['newDisplayName'],
+              oldGiven: j['oldGiven'],
+              oldFamily: j['oldFamily'],
+              timestamp: DateTime.parse(j['timestamp']),
+            );
+          }
+
+          class UnicodeNormalizer {
+            static final RegExp _emojis = RegExp(
+              r'[\u{1F300}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}]',
+              unicode: true,
+            );
+
+            static List<String> extractEmojis(String s) => _emojis.allMatches(s).map((m) => m.group(0)!).toList();
+            static String stripEmojis(String s) => s.replaceAll(_emojis, '').trim();
+
+            static String normalize(String s) {
+              if (s.isEmpty) return '';
+              return s
+                  .replaceAll(RegExp(r'[يى]'), 'ی')
+                  .replaceAll(RegExp(r'ك'), 'ک')
+                  .replaceAll(RegExp(r'ة'), 'ه')
+                  .replaceAll(RegExp(r'[\u200B\u200D\uFEFF]'), '')
+                  .replaceAll(RegExp(r'\s+'), ' ')
+                  .trim();
+            }
+
+            static String toTitleCase(String s) {
+              if (s.isEmpty) return '';
+              return s.split(' ').map((w) {
+                if (w.isEmpty) return '';
+                final l = w.toLowerCase();
+                return l[0].toUpperCase() + l.substring(1);
+              }).join(' ');
+            }
+          }
+
+          class BuiltinLexicon {
+            static const Map<String, String> faToEn = {
+              'محمد': 'Mohammad', 'محمدرضا': 'Mohammadreza', 'علی': 'Ali', 'علیرضا': 'Alireza',
+              'حسین': 'Hossein', 'امیرحسین': 'Amirhossein', 'مهدی': 'Mehdi', 'رضا': 'Reza',
+              'ابوالفضل': 'Abolfazl', 'عبدالله': 'Abdollah', 'فاطمه': 'Fatemeh', 'زهرا': 'Zahra',
+              'مریم': 'Maryam', 'سارا': 'Sara', 'نیلوفر': 'Niloofar', 'دانیال': 'Danial',
+              'رایان': 'Rayan', 'کیان': 'Kian', 'آرمان': 'Arman', 'کوروش': 'Kourosh',
+              'داریوش': 'Dariush', 'آرش': 'Arash', 'رضایی': 'Rezaei', 'محمدی': 'Mohammadi',
+              'حسینی': 'Hosseini', 'احمدی': 'Ahmadi', 'کریمی': 'Karimi', 'موسوی': 'Mousavi',
+              'جعفری': 'Jafari', 'قاسمی': 'Ghasemi', 'هاشمی': 'Hashemi', 'مرادی': 'Moradi',
+              'صادقی': 'Sadeghi', 'دکتر': 'Dr', 'مهندس': 'Mohandes', 'سید': 'Seyed', 'حاج': 'Haj',
+              'جان': 'Jan', 'خانم': 'Khanom', 'آقا': 'Agha',
+            };
+
+            static const Map<String, String> enToFa = {
+              'mohammad': 'محمد', 'mohammadreza': 'محمدرضا', 'ali': 'علی', 'alireza': 'علیرضا',
+              'hossein': 'حسین', 'amirhossein': 'امیرحسین', 'mehdi': 'مهدی', 'reza': 'رضا',
+              'abolfazl': 'ابوالفضل', 'fatemeh': 'فاطمه', 'zahra': 'زهرا', 'maryam': 'مریم',
+              'sara': 'سارا', 'danial': 'دانیال', 'daniel': 'دانیال', 'kian': 'کیان',
+              'arman': 'آرمان', 'rezaei': 'رضایی', 'mohammadi': 'محمدی', 'hosseini': 'حسینی',
+              'ahmadi': 'احمدی', 'karimi': 'کریمی', 'mousavi': 'موسوی', 'ghasemi': 'قاسمی',
+              'dr': 'دکتر', 'seyed': 'سید', 'haj': 'حاج', 'jan': 'جان', 'agha': 'آقا',
+            };
+          }
+
+          class NlpEngine {
+            static const Map<String, String> _faCharMap = {
+              'ا': 'A', 'آ': 'A', 'ب': 'B', 'پ': 'P', 'ت': 'T', 'ث': 'S', 'ج': 'J',
+              'چ': 'Ch', 'ح': 'H', 'خ': 'Kh', 'د': 'D', 'ذ': 'Z', 'ر': 'R', 'ز': 'Z',
+              'ژ': 'Zh', 'س': 'S', 'ش': 'Sh', 'ص': 'S', 'ض': 'Z', 'ط': 'T', 'ظ': 'Z',
+              'ع': 'A', 'غ': 'Gh', 'ف': 'F', 'ق': 'Gh', 'ک': 'K', 'گ': 'G', 'ل': 'L',
+              'م': 'M', 'ن': 'N', 'و': 'V', 'ه': 'H', 'ی': 'I',
+            };
+
+            static const Map<String, String> _finglishDiagraphs = {
+              'kh': 'خ', 'gh': 'ق', 'sh': 'ش', 'ch': 'چ', 'zh': 'ژ',
+              'aa': 'آ', 'ee': 'ی', 'oo': 'و', 'ou': 'و',
+            };
+
+            static AppContact process(AppContact c) {
+              final raw = c.displayName.isNotEmpty ? c.displayName : '${c.givenName} ${c.familyName}'.trim();
+              if (raw.isEmpty) return c;
+
+              final emojis = UnicodeNormalizer.extractEmojis(raw);
+              final clean = UnicodeNormalizer.stripEmojis(raw);
+              final norm = UnicodeNormalizer.normalize(clean);
+
+              final bool hasPersian = RegExp(r'[\u0600-\u06FF]').hasMatch(norm);
+              final bool hasLatin = RegExp(r'[a-zA-Z]').hasMatch(norm);
+
+              final lower = norm.toLowerCase();
+              if (lower.contains('taxi') || lower.contains('تاکسی') || lower.contains('bank') ||
+                  lower.contains('بانک') || lower.contains('pizza') || lower.contains('پیتزا') ||
+                  RegExp(r'^\d+$').hasMatch(norm)) {
+                return c.copyWith(scriptCategory: ScriptCategory.nonNameOrOrg, suggestedOutput: raw, confidence: 1.0);
+              }
+
+              if (hasPersian && hasLatin) {
+                return c.copyWith(scriptCategory: ScriptCategory.mixed, suggestedOutput: raw, confidence: 0.95);
+              }
+
+              String output = '';
+              ScriptCategory cat = ScriptCategory.unknown;
+
+              if (hasPersian && !hasLatin) {
+                cat = ScriptCategory.persian;
+                final tokens = norm.split(RegExp(r'[\s\u200C]+'));
+                final outWords = <String>[];
+
+                for (final t in tokens) {
+                  if (BuiltinLexicon.faToEn.containsKey(t)) {
+                    outWords.add(BuiltinLexicon.faToEn[t]!);
+                  } else {
+                    final sb = StringBuffer();
+                    for (int i = 0; i < t.length; i++) {
+                      final ch = t[i];
+                      if (i == t.length - 1 && ch == 'ه') {
+                        sb.write('eh');
+                      } else {
+                        sb.write(_faCharMap[ch] ?? ch);
+                      }
+                    }
+                    outWords.add(sb.toString());
+                  }
+                }
+                output = UnicodeNormalizer.toTitleCase(outWords.join(' '));
+              }
+
+              if (hasLatin && !hasPersian) {
+                final tokens = norm.split(' ');
+                bool isFinglish = false;
+
+                for (final t in tokens) {
+                  final tl = t.toLowerCase();
+                  if (BuiltinLexicon.enToFa.containsKey(tl) ||
+                      tl.contains('kh') || tl.contains('gh') || tl.contains('zh') ||
+                      tl.endsWith('zadeh') || tl.endsWith('pour') || tl.endsWith('nia')) {
+                    isFinglish = true;
+                    break;
+                  }
+                }
+
+                cat = isFinglish ? ScriptCategory.finglish : ScriptCategory.englishNative;
+
+                if (isFinglish) {
+                  final outWords = <String>[];
+                  for (final t in tokens) {
+                    final tl = t.toLowerCase();
+                    if (BuiltinLexicon.enToFa.containsKey(tl)) {
+                      outWords.add(BuiltinLexicon.enToFa[tl]!);
+                    } else {
+                      outWords.add(_ruleConvertEnToFa(tl));
+                    }
+                  }
+                  output = outWords.join(' ');
+                } else {
+                  output = raw;
+                }
+              }
+
+              if (emojis.isNotEmpty) {
+                output = '$output ${emojis.join('')}'.trim();
+              }
+
+              return c.copyWith(
+                scriptCategory: cat,
+                confidence: 0.92,
+                suggestedOutput: output.isNotEmpty ? output : raw,
+              );
+            }
+
+            static String _ruleConvertEnToFa(String word) {
+              String s = word;
+              _finglishDiagraphs.forEach((k, v) => s = s.replaceAll(k, v));
+              final sb = StringBuffer();
+              const map = {
+                'a': 'ا', 'b': 'ب', 'p': 'پ', 't': 'ت', 'j': 'ج', 'd': 'د',
+                'r': 'ر', 'z': 'ز', 's': 'س', 'f': 'ف', 'k': 'ک', 'g': 'گ',
+                'l': 'ل', 'm': 'م', 'n': 'ن', 'v': 'و', 'w': 'و', 'h': 'ه', 'y': 'ی', 'i': 'ی',
+              };
+              for (int i = 0; i < s.length; i++) {
+                final ch = s[i];
+                sb.write(map[ch] ?? ch);
+              }
+              return sb.toString();
+            }
+          }
+
+          class AuditStorage {
+            static Future<File> _getFile() async {
+              final dir = await getApplicationDocumentsDirectory();
+              return File('${dir.path}/contacts_undo_history.json');
+            }
+
+            static Future<void> saveBatch(List<AuditLogItem> items) async {
+              try {
+                final file = await _getFile();
+                List<dynamic> list = [];
+                if (await file.exists()) {
+                  final content = await file.readAsString();
+                  if (content.isNotEmpty) list = jsonDecode(content);
+                }
+                list.addAll(items.map((e) => e.toJson()));
+                await file.writeAsString(jsonEncode(list));
+              } catch (_) {}
+            }
+
+            static Future<List<AuditLogItem>> loadAll() async {
+              try {
+                final file = await _getFile();
+                if (!await file.exists()) return [];
+                final content = await file.readAsString();
+                if (content.isEmpty) return [];
+                final List<dynamic> list = jsonDecode(content);
+                return list.map((e) => AuditLogItem.fromJson(e as Map<String, dynamic>)).toList();
+              } catch (_) {
+                return [];
+              }
+            }
+
+            static Future<void> removeBatch(String batchId) async {
+              try {
+                final file = await _getFile();
+                if (!await file.exists()) return;
+                final content = await file.readAsString();
+                final List<dynamic> list = jsonDecode(content);
+                list.removeWhere((e) => e['batchId'] == batchId);
+                await file.writeAsString(jsonEncode(list));
+              } catch (_) {}
+            }
+          }
+
+          class ContactState {
+            final bool isLoading;
+            final List<AppContact> all;
+            final List<AppContact> filtered;
+            final Set<String> selectedIds;
+            final ScriptCategory? filterScript;
+            final String query;
+
+            ContactState({
+              this.isLoading = false,
+              this.all = const [],
+              this.filtered = const [],
+              this.selectedIds = const {},
+              this.filterScript,
+              this.query = '',
+            });
+
+            ContactState copyWith({
+              bool? isLoading,
+              List<AppContact>? all,
+              List<AppContact>? filtered,
+              Set<String>? selectedIds,
+              ScriptCategory? filterScript,
+              bool clearFilter = false,
+              String? query,
+            }) {
+              return ContactState(
+                isLoading: isLoading ?? this.isLoading,
+                all: all ?? this.all,
+                filtered: filtered ?? this.filtered,
+                selectedIds: selectedIds ?? this.selectedIds,
+                filterScript: clearFilter ? null : (filterScript ?? this.filterScript),
+                query: query ?? this.query,
+              );
+            }
+          }
+
+          class ContactNotifier extends StateNotifier<ContactState> {
+            ContactNotifier() : super(ContactState());
+
+            Future<void> loadContacts() async {
+              state = state.copyWith(isLoading: true);
+
+              final status = await Permission.contacts.request();
+              if (!status.isGranted) {
+                state = state.copyWith(isLoading: false);
+                return;
+              }
+
+              final raw = await FlutterContacts.getContacts(withProperties: true);
+              final List<AppContact> initial = raw.map((c) {
+                final first = c.name?.first ?? '';
+                final last = c.name?.last ?? '';
+                return AppContact(
+                  id: c.id,
+                  displayName: c.displayName,
+                  givenName: first,
+                  familyName: last,
+                );
+              }).toList();
+
+              final List<AppContact> processed = await Isolate.run(() {
+                return initial.map((c) => NlpEngine.process(c)).toList();
+              });
+
+              state = state.copyWith(
+                isLoading: false,
+                all: processed,
+                filtered: processed,
+              );
+              _applyFilters();
+            }
+
+            void toggleSelect(String id) {
+              final s = Set<String>.from(state.selectedIds);
+              s.contains(id) ? s.remove(id) : s.add(id);
+              state = state.copyWith(selectedIds: s);
+            }
+
+            void selectAll() {
+              state = state.copyWith(selectedIds: state.filtered.map((e) => e.id).toSet());
+            }
+
+            void clearSelection() {
+              state = state.copyWith(selectedIds: {});
+            }
+
+            void setFilter(ScriptCategory? cat) {
+              if (state.filterScript == cat) {
+                state = state.copyWith(clearFilter: true);
+              } else {
+                state = state.copyWith(filterScript: cat);
+              }
+              _applyFilters();
+            }
+
+            void search(String q) {
+              state = state.copyWith(query: q);
+              _applyFilters();
+            }
+
+            void _applyFilters() {
+              var list = state.all;
+              if (state.filterScript != null) {
+                list = list.where((c) => c.scriptCategory == state.filterScript).toList();
+              }
+              if (state.query.trim().isNotEmpty) {
+                final q = state.query.toLowerCase().trim();
+                list = list.where((c) =>
+                    c.displayName.toLowerCase().contains(q) ||
+                    c.suggestedOutput.toLowerCase().contains(q)).toList();
+              }
+              state = state.copyWith(filtered: list);
+            }
+
+            Future<void> applyBatchChanges() async {
+              final toUpdate = state.all.where((c) => state.selectedIds.contains(c.id)).toList();
+              if (toUpdate.isEmpty) return;
+
+              state = state.copyWith(isLoading: true);
+              final batchId = DateTime.now().millisecondsSinceEpoch.toString();
+              final List<AuditLogItem> audit = [];
+
+              for (final item in toUpdate) {
+                if (item.suggestedOutput.isEmpty || item.suggestedOutput == item.displayName) continue;
+
+                final contact = await FlutterContacts.getContact(item.id);
+                if (contact != null) {
+                  final oldFirst = contact.name?.first ?? '';
+                  final oldLast = contact.name?.last ?? '';
+                  audit.add(AuditLogItem(
+                    batchId: batchId,
+                    contactId: item.id,
+                    oldDisplayName: item.displayName,
+                    newDisplayName: item.suggestedOutput,
+                    oldGiven: oldFirst,
+                    oldFamily: oldLast,
+                    timestamp: DateTime.now(),
+                  ));
+
+                  final parts = item.suggestedOutput.split(' ');
+                  final newFirst = parts.first;
+                  final newLast = parts.length > 1 ? parts.sublist(1).join(' ') : '';
+
+                  if (contact.name != null) {
+                    contact.name!.first = newFirst;
+                    contact.name!.last = newLast;
+                  }
+                  await contact.update();
+                }
+              }
+
+              await AuditStorage.saveBatch(audit);
+              await loadContacts();
+              clearSelection();
+            }
+
+            Future<void> rollback(String batchId) async {
+              state = state.copyWith(isLoading: true);
+              final allAudit = await AuditStorage.loadAll();
+              final batchItems = allAudit.where((e) => e.batchId == batchId).toList();
+
+              for (final b in batchItems) {
+                final contact = await FlutterContacts.getContact(b.contactId);
+                if (contact != null) {
+                  if (contact.name != null) {
+                    contact.name!.first = b.oldGiven;
+                    contact.name!.last = b.oldFamily;
+                    await contact.update();
+                  }
+                }
+              }
+
+              await AuditStorage.removeBatch(batchId);
+              await loadContacts();
+            }
+          }
+
+          final contactProvider = StateNotifierProvider<ContactNotifier, ContactState>((ref) => ContactNotifier());
+
+          void main() {
+            WidgetsFlutterBinding.ensureInitialized();
+            runApp(const ProviderScope(child: MyApp()));
+          }
+
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'یکدست‌ساز مخاطبین',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  useMaterial3: true,
+                  colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0D9488)),
+                ),
+                builder: (context, child) {
+                  return Directionality(
+                    textDirection: TextDirection.rtl,
+                    child: child ?? const SizedBox(),
+                  );
+                },
+                home: const HomeScreen(),
+              );
+            }
+          }
+
+          class HomeScreen extends ConsumerStatefulWidget {
+            const HomeScreen({super.key});
+            @override
+            ConsumerState<HomeScreen> createState() => _HomeScreenState();
+          }
+
+          class _HomeScreenState extends ConsumerState<HomeScreen> {
+            @override
+            void initState() {
+              super.initState();
+              Future.microtask(() => ref.read(contactProvider.notifier).loadContacts());
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              final state = ref.watch(contactProvider);
+              final notifier = ref.read(contactProvider.notifier);
+
+              return Scaffold(
+                appBar: AppBar(
+                  title: const Text('یکدست‌ساز مخاطبین'),
+                  actions: [
+                    IconButton(
+                      icon: const Icon(Icons.history_rounded),
+                      tooltip: 'تاریخچه بازگردانی (Undo)',
+                      onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HistoryScreen())),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.select_all_rounded),
+                      tooltip: 'انتخاب همه',
+                      onPressed: () => notifier.selectAll(),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.refresh_rounded),
+                      tooltip: 'بروزرسانی',
+                      onPressed: () => notifier.loadContacts(),
+                    ),
+                  ],
+                ),
+                body: Column(
+                  children: [
+                    if (state.isLoading) const LinearProgressIndicator(),
+                    Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: TextField(
+                        onChanged: notifier.search,
+                        decoration: InputDecoration(
+                          hintText: 'جست‌وجو با نام فارسی، انگلیسی یا فینگلیش...',
+                          prefixIcon: const Icon(Icons.search),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                        ),
+                      ),
+                    ),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: Row(
+                        children: [
+                          _chip('همه', null, state.filterScript, notifier),
+                          _chip('فینگلیش', ScriptCategory.finglish, state.filterScript, notifier),
+                          _chip('فارسی', ScriptCategory.persian, state.filterScript, notifier),
+                          _chip('ترکیبی', ScriptCategory.mixed, state.filterScript, notifier),
+                          _chip('انگلیسی', ScriptCategory.englishNative, state.filterScript, notifier),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: state.filtered.isEmpty
+                          ? const Center(child: Text('هیچ مخاطبی یافت نشد.'))
+                          : ListView.builder(
+                              itemCount: state.filtered.length,
+                              itemBuilder: (ctx, i) {
+                                final c = state.filtered[i];
+                                final isSelected = state.selectedIds.contains(c.id);
+                                final hasDiff = c.suggestedOutput.isNotEmpty && c.suggestedOutput != c.displayName;
+
+                                return Card(
+                                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                  child: ListTile(
+                                    leading: Checkbox(
+                                      value: isSelected,
+                                      onChanged: (_) => notifier.toggleSelect(c.id),
+                                    ),
+                                    title: Row(
+                                      children: [
+                                        Expanded(child: Text(c.displayName, style: const TextStyle(fontWeight: FontWeight.bold))),
+                                        _badge(c.scriptCategory),
+                                      ],
+                                    ),
+                                    subtitle: hasDiff
+                                        ? Text('تبدیل به: ${c.suggestedOutput}', style: const TextStyle(color: Color(0xFF0D9488), fontWeight: FontWeight.w600))
+                                        : null,
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+                bottomNavigationBar: state.selectedIds.isNotEmpty
+                    ? Container(
+                        padding: const EdgeInsets.all(16),
+                        color: Colors.white,
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF0D9488),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                          icon: const Icon(Icons.auto_fix_high),
+                          label: Text('تبدیل ${state.selectedIds.length} مخاطب انتخاب شده'),
+                          onPressed: () async {
+                            await notifier.applyBatchChanges();
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('نام مخاطبین با موفقیت یکدست شد.')),
+                              );
+                            }
+                          },
+                        ),
+                      )
+                    : null,
+              );
+            }
+
+            Widget _chip(String label, ScriptCategory? cat, ScriptCategory? curr, ContactNotifier n) {
+              return Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: FilterChip(
+                  label: Text(label),
+                  selected: curr == cat,
+                  onSelected: (_) => n.setFilter(cat),
+                ),
+              );
+            }
+
+            Widget _badge(ScriptCategory cat) {
+              String txt = 'نامشخص';
+              Color col = Colors.grey;
+              switch (cat) {
+                case ScriptCategory.persian: txt = 'فارسی'; col = Colors.green; break;
+                case ScriptCategory.finglish: txt = 'فینگلیش'; col = Colors.orange; break;
+                case ScriptCategory.englishNative: txt = 'انگلیسی'; col = Colors.blue; break;
+                case ScriptCategory.mixed: txt = 'ترکیبی'; col = Colors.purple; break;
+                case ScriptCategory.nonNameOrOrg: txt = 'سازمانی'; col = Colors.blueGrey; break;
+                default: break;
+              }
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(color: col.withOpacity(0.15), borderRadius: BorderRadius.circular(6)),
+                child: Text(txt, style: TextStyle(color: col, fontSize: 11, fontWeight: FontWeight.bold)),
+              );
+            }
+          }
+
+          class HistoryScreen extends ConsumerWidget {
+            const HistoryScreen({super.key});
+
+            @override
+            Widget build(BuildContext context, WidgetRef ref) {
+              return Scaffold(
+                appBar: AppBar(title: const Text('تاریخچه تبدیل‌ها و بازگردانی (Undo)')),
+                body: FutureBuilder<List<AuditLogItem>>(
+                  future: AuditStorage.loadAll(),
+                  builder: (ctx, snap) {
+                    if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+                    final items = snap.data!;
+                    if (items.isEmpty) return const Center(child: Text('هیچ سابقه تبدیلی ثبت نشده است.'));
+
+                    final Map<String, List<AuditLogItem>> groups = {};
+                    for (final i in items) {
+                      groups.putIfAbsent(i.batchId, () => []).add(i);
+                    }
+
+                    final batchKeys = groups.keys.toList();
+
+                    return ListView.builder(
+                      itemCount: batchKeys.length,
+                      itemBuilder: (ctx, idx) {
+                        final bId = batchKeys[idx];
+                        final list = groups[bId]!;
+                        final time = list.first.timestamp;
+
+                        return Card(
+                          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('تبدیل ${list.length} مخاطب در تاریخ ${time.year}/${time.month}/${time.day} ساعت ${time.hour}:${time.minute}',
+                                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 8),
+                                OutlinedButton.icon(
+                                  style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                                  icon: const Icon(Icons.undo),
+                                  label: const Text('بازگردانی تمام نام‌ها به قبل'),
+                                  onPressed: () async {
+                                    await ref.read(contactProvider.notifier).rollback(bId);
+                                    if (context.mounted) {
+                                      Navigator.pop(context);
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(content: Text('نام‌ها با موفقیت به حالت قبل بازگشتند.')),
+                                      );
+                                    }
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              );
+            }
+          }
+          '''
+          with open("app_project/lib/main.dart", "w", encoding="utf-8") as f:
+              f.write(textwrap.dedent(dart_code).strip())
+
+      - name: Configure Android Permissions
+        shell: python
+        run: |
+          manifest = 'app_project/android/app/src/main/AndroidManifest.xml'
+          with open(manifest, 'r', encoding='utf-8') as f:
+              txt = f.read()
+          perms = '    <uses-permission android:name="android.permission.READ_CONTACTS" />\n    <uses-permission android:name="android.permission.WRITE_CONTACTS" />\n'
+          if 'READ_CONTACTS' not in txt:
+              txt = txt.replace('<application', perms + '    <application')
+              with open(manifest, 'w', encoding='utf-8') as f:
+                  f.write(txt)
+
+      - name: Build APK
+        run: |
+          cd app_project
           flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK
